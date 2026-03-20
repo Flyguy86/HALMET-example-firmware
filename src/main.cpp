@@ -27,11 +27,15 @@
 #include "sensesp_app_builder.h"
 #define BUILDER_CLASS SensESPAppBuilder
 
+#include <time.h>
+
 #include "halmet_analog.h"
 #include "halmet_const.h"
 #include "halmet_digital.h"
 #include "halmet_display.h"
 #include "halmet_serial.h"
+#include "halmet_sk_udp.h"
+#include "halmet_web.h"
 #include "sensesp/net/http_server.h"
 #include "sensesp/net/networking.h"
 
@@ -86,22 +90,75 @@ void setup() {
   // esp_log_level_set("*", esp_log_level_t::ESP_LOG_DEBUG);
 
   Serial.begin(115200);
+  delay(200);  // brief pause so serial monitor can connect
+
+  Serial.println("\n\n=================================");
+  Serial.println("       HALMET FIRMWARE BOOT");
+  Serial.println("=================================");
+  Serial.printf("Chip:      %s  rev %d  cores %d\n",
+    ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores());
+  Serial.printf("Flash:     %u MB\n", ESP.getFlashChipSize() / (1024 * 1024));
+  Serial.printf("Free heap: %u bytes\n", ESP.getFreeHeap());
+  Serial.printf("SDK:       %s\n", ESP.getSdkVersion());
+  Serial.println("---------------------------------");
+  Serial.printf("AP SSID will be: \"halmet\" (open, no password)\n");
+  Serial.printf("AP IP will be:    192.168.4.1\n");
+  Serial.printf("Web UI (AP mode): http://192.168.4.1/\n");
+  Serial.printf("Dashboard:        http://192.168.4.1:8080/data\n");
+  Serial.println("---------------------------------");
 
   /////////////////////////////////////////////////////////////////////
   // Initialize the application framework
 
   // Construct the global SensESPApp() object
   BUILDER_CLASS builder;
-  sensesp_app = (&builder)
-                    // EDIT: Set a custom hostname for the app.
-                    ->set_hostname("halmet")
-                    // EDIT: Optionally, hard-code the WiFi and Signal K server
-                    // settings. This is normally not needed.
-                    //->set_wifi("My WiFi SSID", "my_wifi_password")
-                    //->set_sk_server("192.168.10.3", 80)
-                    // EDIT: Enable OTA updates with a password.
-                    //->enable_ota("my_ota_password")
-                    ->get_app();
+  // enable_wifi_watchdog() returns const*, so call it before get_app().
+  builder.set_hostname("halmet")
+      // No explicit set_wifi_access_point() call here.
+      // SensESP defaults: AP SSID = hostname ("halmet"), password = "thisisfine"
+      // We override to open (no-password) AP right after get_app() below.
+      // EDIT: Optionally, hard-code the WiFi and Signal K server settings.
+      //->set_wifi_client("My WiFi SSID", "my_wifi_password")
+      //->set_sk_server("192.168.10.3", 80)
+      // EDIT: Enable OTA updates with a password.
+      //->enable_ota("my_ota_password")
+      ;
+  // Note: wifi watchdog disabled — it would restart the device in AP mode
+  // before you could connect and configure Wi-Fi. Re-enable once a network
+  // is saved: builder.enable_wifi_watchdog();
+  sensesp_app = builder.get_app();
+  Serial.println("[BOOT] SensESP app initialised — WiFi manager starting");
+
+  // SensESP started the AP with password "thisisfine". Override it immediately
+  // with an open (no-password) AP so first-time setup requires no password.
+  WiFi.softAP("halmet");
+  Serial.println("[BOOT] AP reconfigured to open (no password) — SSID: halmet");
+
+  // Start the live-data web dashboard on port 8080.
+  // Access it at http://halmet.local:8080/data (or http://<ip>:8080/data).
+  // SensESP's own configuration UI continues to run at http://halmet.local/.
+  //
+  // WiFi AP mode: if no network credentials are stored the device creates
+  // an open soft-AP named "halmet" (no password).  Browse to
+  // http://192.168.4.1/wifi to add a network.
+  SetupWebDataDisplay();
+  Serial.println("[BOOT] Web dashboard started on port 8080");
+
+  // Start Signal K UDP broadcaster (multicast 239.2.5.26:4445).
+  // Clients like Signal K iOS / OpenCPN can subscribe to this address to
+  // receive live sensor data without a dedicated SK server.
+  halmet::SetupSKUDP();
+
+  // Start NTP time sync (UTC, no DST). SNTP runs in the background and
+  // syncs automatically once WiFi is connected.  We also re-trigger on
+  // every STA_GOT_IP event so a reconnect after credential changes re-syncs.
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  Serial.println("[NTP] SNTP started — UTC, pool.ntp.org + time.google.com");
+
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    Serial.println("[NTP] STA got IP — (re-)syncing time");
+    configTime(0, 0, "pool.ntp.org", "time.google.com");
+  }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
 
   // initialize the I2C bus
   i2c = new TwoWire(0);
@@ -204,6 +261,12 @@ void setup() {
         [](float value) { PrintValue(display, 2, "Tank A1", 100 * value); }));
   }
 
+  // Always update the web dashboard and SK-UDP with the tank level.
+  tank_a1_volume->connect_to(new LambdaConsumer<float>([](float value) {
+    UpdateWebDataValue("Tank A1", String(100 * value, 1) + " %");
+    halmet::PublishSKFloat("tanks.fuel.main.currentLevel", value);
+  }));
+
   // Read the voltage level of analog input A2
   auto a2_voltage = new ADS1115VoltageInput(ads1115, 1, "/Voltage A2");
 
@@ -212,8 +275,11 @@ void setup() {
       ->set_description("Voltage level of analog input A2")
       ->set_sort_order(3000);
 
-  a2_voltage->connect_to(new LambdaConsumer<float>(
-      [](float value) { debugD("Voltage A2: %f", value); }));
+  a2_voltage->connect_to(new LambdaConsumer<float>([](float value) {
+    debugD("Voltage A2: %f", value);
+    UpdateWebDataValue("Voltage A2", String(value, 3) + " V");
+    halmet::PublishSKFloat("electrical.batteries.house.voltage", value);
+  }));
 
   // If you want to output something else than the voltage value,
   // you can insert a suitable transform here.
@@ -241,13 +307,19 @@ void setup() {
 
   // Update the alarm states based on the input value changes.
   // EDIT: If you added more alarm inputs, uncomment the respective lines below.
-  alarm_d2_input->connect_to(
-      new LambdaConsumer<bool>([](bool value) { alarm_states[1] = value; }));
+  alarm_d2_input->connect_to(new LambdaConsumer<bool>([](bool value) {
+    alarm_states[1] = value;
+    UpdateWebDataValue("Alarm D2", value);
+    halmet::PublishSKBool("propulsion.main.oilPressureAlarm", value);
+  }));
   // In this example, alarm_d3_input is active low, so invert the value.
   auto alarm_d3_inverted = alarm_d3_input->connect_to(
       new LambdaTransform<bool, bool>([](bool value) { return !value; }));
-  alarm_d3_inverted->connect_to(
-      new LambdaConsumer<bool>([](bool value) { alarm_states[2] = value; }));
+  alarm_d3_inverted->connect_to(new LambdaConsumer<bool>([](bool value) {
+    alarm_states[2] = value;
+    UpdateWebDataValue("Alarm D3", value);
+    halmet::PublishSKBool("propulsion.main.overTemperatureAlarm", value);
+  }));
   // alarm_d4_input->connect_to(
   //     new LambdaConsumer<bool>([](bool value) { alarm_states[3] = value; }));
 
@@ -297,6 +369,12 @@ void setup() {
         [](float value) { PrintValue(display, 3, "RPM D1", 60 * value); }));
   }
 
+  // Always update the web dashboard and SK-UDP with RPM.
+  tacho_d1_frequency->connect_to(new LambdaConsumer<float>([](float value) {
+    UpdateWebDataValue("RPM D1", String(60 * value, 0) + " rpm");
+    halmet::PublishSKFloat("propulsion.main.revolutions", value);  // Hz
+  }));
+
   ///////////////////////////////////////////////////////////////////
   // Display setup
 
@@ -315,6 +393,41 @@ void setup() {
       PrintValue(display, 4, "Alarm", state_string);
     });
   }
+
+  // Periodically print WiFi + NTP status to serial for debugging.
+  event_loop()->onRepeat(3000, []() {
+    wifi_mode_t mode = WiFi.getMode();
+    const char* mode_str =
+      (mode == WIFI_MODE_APSTA) ? "AP+STA" :
+      (mode == WIFI_MODE_AP)    ? "AP only" :
+      (mode == WIFI_MODE_STA)   ? "STA only" : "OFF";
+    Serial.printf("[WiFi] mode=%-8s  AP_SSID=\"%-10s\"  AP_IP=%-15s  STA_IP=%-15s  RSSI=%d dBm\n",
+      mode_str,
+      WiFi.softAPSSID().c_str(),
+      WiFi.softAPIP().toString().c_str(),
+      WiFi.localIP().toString().c_str(),
+      (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0);
+    struct tm ti;
+    if (getLocalTime(&ti, 0)) {
+      char tbuf[32];
+      strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S UTC", &ti);
+      Serial.printf("[NTP]  Time: %s\n", tbuf);
+    } else {
+      Serial.println("[NTP]  Time: not yet synced");
+    }
+  });
+
+  // Periodically update the web dashboard with WiFi/network status.
+  event_loop()->onRepeat(5000, []() {
+    if (WiFi.status() == WL_CONNECTED) {
+      UpdateWebDataValue("WiFi IP", WiFi.localIP().toString());
+      UpdateWebDataValue("WiFi SSID", WiFi.SSID());
+      UpdateWebDataValue("WiFi RSSI", String(WiFi.RSSI()) + " dBm");
+    } else {
+      UpdateWebDataValue("WiFi", "Disconnected");
+    }
+    UpdateWebDataValue("Uptime", String(millis() / 1000) + " s");
+  });
 
   // To avoid garbage collecting all shared pointers created in setup(),
   // loop from here.
