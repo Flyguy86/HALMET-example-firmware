@@ -155,10 +155,29 @@ void setup() {
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   Serial.println("[NTP] SNTP started — UTC, pool.ntp.org + time.google.com");
 
+  // When STA connects: shut down the AP (no longer needed) and sync NTP.
   WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
-    Serial.println("[NTP] STA got IP — (re-)syncing time");
+    String ip = WiFi.localIP().toString();
+    Serial.println("\n=========================================");
+    Serial.println("       HALMET — NETWORK CONNECTED");
+    Serial.println("=========================================");
+    Serial.printf("  IP Address : %s\n", ip.c_str());
+    Serial.printf("  Config UI  : http://%s/\n", ip.c_str());
+    Serial.printf("  Dashboard  : http://%s:8080/data\n", ip.c_str());
+    Serial.printf("  WiFi setup : http://%s/wifi\n", ip.c_str());
+    Serial.printf("  mDNS       : http://halmet.local:8080/data\n");
+    Serial.println("-----------------------------------------");
+    WiFi.softAPdisconnect(true);  // disconnect AP clients and stop soft-AP
+    Serial.println("[NTP] (re-)syncing time");
     configTime(0, 0, "pool.ntp.org", "time.google.com");
   }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+
+  // When STA disconnects: bring the AP back so the user can always
+  // reach the device to reconfigure WiFi.
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    Serial.println("[WiFi] STA disconnected — re-enabling open AP 'halmet'");
+    WiFi.softAP("halmet");
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
   // initialize the I2C bus
   i2c = new TwoWire(0);
