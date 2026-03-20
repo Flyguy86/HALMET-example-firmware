@@ -213,12 +213,19 @@ td:last-child{color:#e6edf3;font-weight:500;word-break:break-all}
 .pin .pname{color:#8b949e;font-size:.75em;text-transform:uppercase;letter-spacing:.8px}
 .pin .pval{margin-top:2px;font-weight:700;font-size:1.05em}
 .hi{color:#3fb950}.lo{color:#484f58}.an{color:#58a6ff}.out{color:#f0883e}
+.sg{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:18px}
+@media(max-width:600px){.sg{grid-template-columns:repeat(2,1fr)}}
+.sc{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px}
+.sn{font-size:.65em;color:#f0883e;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
+.sv{font-size:1.15em;font-weight:700;color:#58a6ff}
+.sv.al-on{color:#f85149}.sv.al-off{color:#3fb950}.sv.na{color:#484f58}
 footer{margin-top:16px;font-size:.7em;color:#484f58;border-top:1px solid #21262d;padding-top:8px}
 a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
 <header><h1>&#x1F41E; HALMET Debug</h1><span id="status">Loading&hellip;</span></header>
+<div id="sensors"></div>
 <div id="body"></div>
 <footer>
   <a href="/data">Live Sensor Dashboard</a> &nbsp;|&nbsp;
@@ -349,6 +356,36 @@ async function refresh(){
     document.getElementById('status').textContent='Error: '+e;
   }
 }
+const SLOTS=[
+  {k:'Tank A1',    n:'A1 \u00b7 Tank'},
+  {k:'Voltage A2', n:'A2 \u00b7 Voltage'},
+  {k:'Voltage A3', n:'A3 \u00b7 Voltage'},
+  {k:'Voltage A4', n:'A4 \u00b7 Voltage'},
+  {k:'RPM D1',     n:'D1 \u00b7 Tacho'},
+  {k:'Alarm D2',   n:'D2 \u00b7 Alarm'},
+  {k:'Alarm D3',   n:'D3 \u00b7 Alarm'},
+  {k:'Alarm D4',   n:'D4 \u00b7 Alarm'},
+];
+async function refreshSensors(){
+  try{
+    const r=await fetch('/api/data?t='+Date.now());
+    const j=await r.json();
+    const m={};
+    j.data.forEach(d=>{m[d.label]=d.value;});
+    let h='<div class="section"><div class="section-title">Sensor Readings</div><div class="sg">';
+    SLOTS.forEach(s=>{
+      const v=m[s.k]||'\u2014';
+      const na=v==='\u2014';
+      const isAlarm=s.k.indexOf('Alarm')>=0;
+      let c='sv'+(na?' na':isAlarm?(v==='ON'?' al-on':' al-off'):'');
+      h+='<div class="sc"><div class="sn">'+s.n+'</div><div class="'+c+'">'+v+'</div></div>';
+    });
+    h+='</div></div>';
+    document.getElementById('sensors').innerHTML=h;
+  }catch(e){}
+}
+refreshSensors();
+setInterval(refreshSensors,1000);
 refresh();
 setInterval(refresh,1000);
 </script>

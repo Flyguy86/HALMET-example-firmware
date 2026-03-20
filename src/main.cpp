@@ -144,6 +144,16 @@ void setup() {
   SetupWebDataDisplay();
   Serial.println("[BOOT] Web dashboard started on port 8080");
 
+  // Pre-seed all sensor slots so they appear in grids even when inactive.
+  UpdateWebDataValue("Tank A1",    "\u2014");
+  UpdateWebDataValue("Voltage A2", "\u2014");
+  UpdateWebDataValue("Voltage A3", "\u2014");
+  UpdateWebDataValue("Voltage A4", "\u2014");
+  UpdateWebDataValue("RPM D1",     "\u2014");
+  UpdateWebDataValue("Alarm D2",   "\u2014");
+  UpdateWebDataValue("Alarm D3",   "\u2014");
+  UpdateWebDataValue("Alarm D4",   "\u2014");
+
   // Start Signal K UDP broadcaster (multicast 239.2.5.26:4445).
   // Clients like Signal K iOS / OpenCPN can subscribe to this address to
   // receive live sensor data without a dedicated SK server.
